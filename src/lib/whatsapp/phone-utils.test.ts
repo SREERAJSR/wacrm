@@ -5,6 +5,7 @@ import {
   normalizePhone,
   phoneVariants,
   phonesMatch,
+  preferMetaWhatsAppId,
   sanitizePhoneForMeta,
 } from "./phone-utils";
 
@@ -133,6 +134,43 @@ describe("phoneVariants", () => {
   it("returns just the original when the number is too short for any CC slice", () => {
     // 1-char input is shorter than all ccLen values; both loops skip.
     expect(phoneVariants("1")).toEqual(["1"]);
+  });
+
+  it("prepends common country codes for national-looking 10-digit mobiles", () => {
+    const out = phoneVariants("8547905362");
+    expect(out[0]).toBe("8547905362");
+    // India +91 is what Meta's allowlist / console send use for this number.
+    expect(out).toContain("918547905362");
+    expect(out).toContain("18547905362");
+  });
+
+  it("does not explode already-international numbers with CC prefixes", () => {
+    const out = phoneVariants("918547905362");
+    // 12 digits — beyond the 8–11 national window, so no prepended CCs.
+    expect(out.every((v) => !v.startsWith("9191"))).toBe(true);
+    expect(out[0]).toBe("918547905362");
+  });
+});
+
+describe("preferMetaWhatsAppId", () => {
+  it("upgrades a local mobile to Meta's international WhatsApp ID", () => {
+    expect(preferMetaWhatsAppId("8547905362", "918547905362")).toBe(
+      "918547905362",
+    );
+  });
+
+  it("returns null when numbers are already identical", () => {
+    expect(preferMetaWhatsAppId("918547905362", "918547905362")).toBeNull();
+  });
+
+  it("returns null when numbers do not refer to the same recipient", () => {
+    expect(preferMetaWhatsAppId("8547905362", "919999999999")).toBeNull();
+  });
+
+  it("prefers Meta when same length but trunk-prefix differs", () => {
+    expect(preferMetaWhatsAppId("370063949836", "37063949836")).toBe(
+      "37063949836",
+    );
   });
 });
 

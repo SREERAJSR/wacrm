@@ -41,6 +41,29 @@ export function isValidE164(phone: string): boolean {
 }
 
 /**
+ * High-traffic country calling codes we try when a stored contact
+ * phone looks national-only (missing the country code). Meta's
+ * sandbox allowlist and Cloud API sends require full international
+ * digits (e.g. `918547905362`); contacts often get saved as local
+ * mobile numbers (`8547905362`), so the developer console works while
+ * CRM sends fail with #131030.
+ *
+ * Order is roughly WhatsApp usage / how often local-only contacts
+ * show up in our support tickets — not exhaustive.
+ */
+const FALLBACK_COUNTRY_CODES = [
+  '1', // US/CA
+  '91', // IN
+  '44', // GB
+  '55', // BR
+  '49', // DE
+  '62', // ID
+  '52', // MX
+  '57', // CO
+  '370', // LT (project origin)
+] as const
+
+/**
  * Generate plausible phone number variants for retry when Meta's
  * sandbox rejects a number with error #131030 ("not in allowed list").
  *
@@ -50,10 +73,12 @@ export function isValidE164(phone: string): boolean {
  * But some sandboxes register the number with the trunk 0 included,
  * causing sends to the correct international format to fail.
  *
- * This helper yields up to 3 variants:
+ * This helper yields:
  *   1. The original sanitized number (first attempt)
  *   2. With a trunk 0 inserted after the country code
  *   3. With a trunk 0 removed after the country code
+ *   4. With a common country calling code prepended (when the number
+ *      looks national-only — typical 8–11 digit local mobiles)
  *
  * Country-code lengths of 1, 2, and 3 digits are tried because we
  * don't know the user's country ahead of time.
@@ -91,7 +116,39 @@ export function phoneVariants(sanitized: string): string[] {
     }
   }
 
+  // 4. Prepend common country codes when the stored number looks like
+  // it omitted the calling code. Skip numbers that already look
+  // international (12+ digits) so we don't explode long E.164 values.
+  if (sanitized.length >= 8 && sanitized.length <= 11) {
+    for (const cc of FALLBACK_COUNTRY_CODES) {
+      if (sanitized.startsWith(cc)) continue
+      const candidate = cc + sanitized
+      // E.164 max is 15 digits
+      if (candidate.length <= 15) push(candidate)
+    }
+  }
+
   return [...seen]
+}
+
+/**
+ * Prefer Meta's WhatsApp Cloud API `from` / `wa_id` over a previously
+ * stored contact phone when they refer to the same number but differ
+ * in format (missing country code, trunk-0, etc.).
+ *
+ * Example: contact saved as `8547905362`, inbound from `918547905362`
+ * → return `918547905362` so outbound sends match the allowlist.
+ */
+export function preferMetaWhatsAppId(
+  storedPhone: string,
+  metaWhatsAppId: string,
+): string | null {
+  const stored = normalizePhone(storedPhone)
+  const incoming = normalizePhone(metaWhatsAppId)
+  if (!incoming || !stored || incoming === stored) return null
+  if (!phonesMatch(stored, incoming)) return null
+  // Meta's Cloud API ID is the authoritative send destination.
+  return incoming
 }
 
 /**

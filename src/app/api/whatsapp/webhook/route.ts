@@ -2,7 +2,10 @@ import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
-import { normalizePhone } from '@/lib/whatsapp/phone-utils'
+import {
+  normalizePhone,
+  preferMetaWhatsAppId,
+} from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
@@ -1000,13 +1003,40 @@ async function findOrCreateContact(
   )
 
   if (existingContact) {
-    // Update name if it changed
-    if (name && name !== existingContact.name) {
-      await supabaseAdmin()
+    // Reconcile with Meta's authoritative WhatsApp ID. Contacts often
+    // get created/imported as local mobiles (no country code); inbound
+    // `from` is full international. Prefer Meta's value so CRM replies
+    // hit the same digits the sandbox allowlist / Cloud API expect.
+    const betterPhone = preferMetaWhatsAppId(existingContact.phone, phone)
+    const nameChanged = !!(name && name !== existingContact.name)
+
+    if (betterPhone || nameChanged) {
+      const patch: Record<string, string> = {
+        updated_at: new Date().toISOString(),
+      }
+      if (betterPhone) patch.phone = betterPhone
+      if (nameChanged) patch.name = name
+
+      const { data: updated, error: updateError } = await supabaseAdmin()
         .from('contacts')
-        .update({ name, updated_at: new Date().toISOString() })
+        .update(patch)
         .eq('id', existingContact.id)
+        .select()
+        .single()
+
+      if (updateError) {
+        // Unique conflict on phone_normalized — keep the existing row
+        // rather than dropping the inbound message.
+        console.warn(
+          '[webhook] contact reconcile failed; keeping existing phone:',
+          updateError.message,
+        )
+        return { contact: existingContact, wasCreated: false }
+      }
+
+      return { contact: updated ?? existingContact, wasCreated: false }
     }
+
     return { contact: existingContact, wasCreated: false }
   }
 
